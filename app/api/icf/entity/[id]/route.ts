@@ -9,7 +9,9 @@ const ICF_BASE_URL =
 
 type WHOEntity = {
   "@id"?: string;
+
   code?: string;
+
   classKind?: string;
 
   title?: {
@@ -23,6 +25,7 @@ type WHOEntity = {
   };
 
   child?: string[];
+
   parent?: string[];
 
   browserUrl?: string;
@@ -42,8 +45,54 @@ type WHOEntity = {
     };
 
     foundationReference?: string;
+
     linearizationReference?: string;
   }[];
+};
+
+type QualifierEntity = {
+  "@id"?: string;
+
+  code?: string;
+
+  classKind?: string;
+
+  title?: {
+    "@language"?: string;
+    "@value"?: string;
+  };
+
+  definition?: {
+    "@language"?: string;
+    "@value"?: string;
+  };
+
+  browserUrl?: string;
+
+  child?: string[];
+};
+
+type QualifierOption = {
+  id: string | null;
+  code: string | null;
+  title: string | null;
+  definition: string | null;
+  classKind: string | null;
+  url: string;
+  browserUrl: string | null;
+};
+
+type QualifierAxis = {
+  axis: string | null;
+  axisName: string | null;
+  required: boolean;
+  multiple:
+    | "AllowAlways"
+    | "NotAllowed"
+    | "AllowedExceptFromSameBlock"
+    | null;
+  scaleEntities: string[];
+  options: QualifierOption[];
 };
 
 async function getAccessToken(): Promise<string> {
@@ -114,18 +163,311 @@ function extractIdFromUrl(
   return match ? match[1] : null;
 }
 
-function createTreeReference(
+function extractAxisName(
+  axisName?: string
+): string | null {
+  if (!axisName) {
+    return null;
+  }
+
+  const parts = axisName.split("/");
+
+  return (
+    parts[parts.length - 1] || null
+  );
+}
+
+function normalizeMultipleValues(
+  value?: string
+):
+  | "AllowAlways"
+  | "NotAllowed"
+  | "AllowedExceptFromSameBlock"
+  | null {
+  if (value === "AllowAlways") {
+    return "AllowAlways";
+  }
+
+  if (value === "NotAllowed") {
+    return "NotAllowed";
+  }
+
+  if (
+    value ===
+    "AllowedExceptFromSameBlock"
+  ) {
+    return "AllowedExceptFromSameBlock";
+  }
+
+  return null;
+}
+
+async function getEntity(
+  token: string,
   url: string
-) {
+): Promise<WHOEntity> {
   const normalizedUrl =
     normalizeUrl(url);
 
-  return {
-    id: extractIdFromUrl(
+  const response = await fetch(
+    normalizedUrl,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "API-Version": "v2",
+        Accept: "application/json",
+        "Accept-Language": "pt",
+      },
+
+      cache: "no-store",
+    }
+  );
+
+  const responseText =
+    await response.text();
+
+  if (!response.ok) {
+    throw new Error(
+      `Erro ao consultar ${normalizedUrl}: ${response.status} ${responseText}`
+    );
+  }
+
+  try {
+    return JSON.parse(responseText);
+  } catch {
+    throw new Error(
+      `A OMS retornou uma resposta inválida para ${normalizedUrl}.`
+    );
+  }
+}
+
+async function getQualifierEntity(
+  token: string,
+  url: string
+): Promise<QualifierEntity | null> {
+  try {
+    const entity =
+      await getEntity(
+        token,
+        url
+      );
+
+    return {
+      "@id": entity["@id"],
+
+      code:
+        entity.code || undefined,
+
+      classKind:
+        entity.classKind || undefined,
+
+      title:
+        entity.title || undefined,
+
+      definition:
+        entity.definition || undefined,
+
+      browserUrl:
+        entity.browserUrl || undefined,
+
+      child:
+        Array.isArray(entity.child)
+          ? entity.child
+          : [],
+    };
+  } catch (error) {
+    console.error(
+      "Erro ao consultar qualificador:",
+      url,
+      error
+    );
+
+    return null;
+  }
+}
+
+async function collectQualifierOptions(
+  token: string,
+  url: string,
+  visited: Set<string>
+): Promise<QualifierOption[]> {
+  const normalizedUrl =
+    normalizeUrl(url);
+
+  if (visited.has(normalizedUrl)) {
+    return [];
+  }
+
+  visited.add(normalizedUrl);
+
+  const entity =
+    await getQualifierEntity(
+      token,
       normalizedUrl
-    ),
-    url: normalizedUrl,
-  };
+    );
+
+  if (!entity) {
+    return [];
+  }
+
+  const children =
+    Array.isArray(entity.child)
+      ? entity.child
+      : [];
+
+  /*
+   * Quando chegamos a uma entidade sem
+   * filhos, consideramos que ela é uma
+   * opção final de qualificador.
+   */
+  if (children.length === 0) {
+    return [
+      {
+        id:
+          extractIdFromUrl(
+            entity["@id"] ||
+              normalizedUrl
+          ),
+
+        code:
+          entity.code || null,
+
+        title:
+          entity.title?.["@value"] ||
+          null,
+
+        definition:
+          entity.definition?.[
+            "@value"
+          ] || null,
+
+        classKind:
+          entity.classKind || null,
+
+        url:
+          normalizeUrl(
+            entity["@id"] ||
+              normalizedUrl
+          ),
+
+        browserUrl:
+          entity.browserUrl || null,
+      },
+    ];
+  }
+
+  /*
+   * scaleEntity pode apontar para um
+   * nível hierárquico e não necessariamente
+   * para o qualificador final.
+   *
+   * Por isso percorremos os descendentes
+   * até chegar às folhas.
+   */
+  const descendants =
+    await Promise.all(
+      children.map(
+        (childUrl) =>
+          collectQualifierOptions(
+            token,
+            childUrl,
+            visited
+          )
+      )
+    );
+
+  return descendants.flat();
+}
+
+async function buildQualifierAxes(
+  token: string,
+  data: WHOEntity
+): Promise<QualifierAxis[]> {
+  if (
+    !Array.isArray(
+      data.postcoordinationScale
+    )
+  ) {
+    return [];
+  }
+
+  const axes =
+    await Promise.all(
+      data.postcoordinationScale.map(
+        async (scale) => {
+          const scaleEntities =
+            Array.isArray(
+              scale.scaleEntity
+            )
+              ? scale.scaleEntity.map(
+                  normalizeUrl
+                )
+              : [];
+
+          const visited =
+            new Set<string>();
+
+          const options =
+            await Promise.all(
+              scaleEntities.map(
+                (url) =>
+                  collectQualifierOptions(
+                    token,
+                    url,
+                    visited
+                  )
+              )
+            );
+
+          /*
+           * Remove duplicidades caso
+           * diferentes caminhos da hierarquia
+           * levem ao mesmo qualificador.
+           */
+          const uniqueOptions =
+            Array.from(
+              new Map(
+                options
+                  .flat()
+                  .map(
+                    (option) => [
+                      option.id ||
+                        option.url,
+                      option,
+                    ]
+                  )
+              ).values()
+            );
+
+          return {
+            axis:
+              extractAxisName(
+                scale.axisName
+              ),
+
+            axisName:
+              scale.axisName ||
+              null,
+
+            required:
+              scale.requiredPostcoordination ===
+              "true",
+
+            multiple:
+              normalizeMultipleValues(
+                scale.allowMultipleValues
+              ),
+
+            scaleEntities,
+
+            options:
+              uniqueOptions,
+          };
+        }
+      )
+    );
+
+  return axes;
 }
 
 export async function GET(
@@ -141,12 +483,14 @@ export async function GET(
      * =====================================================
      */
 
-    const user = await getUser();
+    const user =
+      await getUser();
 
     if (!user) {
       return NextResponse.json(
         {
           success: false,
+
           error:
             "Não autorizado. Faça login para acessar a CIF.",
         },
@@ -172,6 +516,7 @@ export async function GET(
       return NextResponse.json(
         {
           success: false,
+
           error:
             "ID da categoria não informado.",
         },
@@ -183,7 +528,7 @@ export async function GET(
 
     /*
      * =====================================================
-     * TOKEN OMS
+     * TOKEN
      * =====================================================
      */
 
@@ -192,7 +537,7 @@ export async function GET(
 
     /*
      * =====================================================
-     * CONSULTA DA ENTIDADE
+     * ENTIDADE PRINCIPAL
      * =====================================================
      */
 
@@ -235,10 +580,15 @@ export async function GET(
       return NextResponse.json(
         {
           success: false,
+
           error:
             "A OMS retornou uma resposta inválida.",
+
           status:
             response.status,
+
+          response:
+            responseText,
         },
         {
           status:
@@ -251,10 +601,13 @@ export async function GET(
       return NextResponse.json(
         {
           success: false,
+
           error:
             "Não foi possível obter a categoria.",
+
           status:
             response.status,
+
           details:
             data,
         },
@@ -267,6 +620,29 @@ export async function GET(
 
     /*
      * =====================================================
+     * QUALIFICADORES / POSTCOORDENAÇÃO
+     * =====================================================
+     *
+     * Aqui usamos diretamente o
+     * postcoordinationScale informado
+     * pela OMS para aquela categoria.
+     *
+     * Isso permite descobrir dinamicamente:
+     *
+     * - quais eixos são aplicáveis
+     * - quais são obrigatórios
+     * - se podem existir múltiplos valores
+     * - quais conjuntos de qualificadores são permitidos
+     */
+
+    const qualifierAxes =
+      await buildQualifierAxes(
+        token,
+        data
+      );
+
+    /*
+     * =====================================================
      * FILHOS
      * =====================================================
      */
@@ -274,7 +650,17 @@ export async function GET(
     const children =
       Array.isArray(data.child)
         ? data.child.map(
-            createTreeReference
+            (url) => ({
+              id:
+                extractIdFromUrl(
+                  url
+                ),
+
+              url:
+                normalizeUrl(
+                  url
+                ),
+            })
           )
         : [];
 
@@ -287,7 +673,17 @@ export async function GET(
     const parents =
       Array.isArray(data.parent)
         ? data.parent.map(
-            createTreeReference
+            (url) => ({
+              id:
+                extractIdFromUrl(
+                  url
+                ),
+
+              url:
+                normalizeUrl(
+                  url
+                ),
+            })
           )
         : [];
 
@@ -324,27 +720,6 @@ export async function GET(
             })
           )
         : [];
-
-    /*
-     * =====================================================
-     * QUALIFICADORES
-     *
-     * Temporariamente não fazemos consultas adicionais
-     * aqui.
-     *
-     * Primeiro validamos que a seleção da categoria
-     * funciona corretamente.
-     *
-     * A OMS utiliza postcoordinationScale para informar
-     * os eixos de qualificação e seus conjuntos de valores.
-     * Vamos implementar essa parte separadamente depois.
-     * =====================================================
-     */
-
-    const qualifiers = {
-      performance: [],
-      capacity: [],
-    };
 
     /*
      * =====================================================
@@ -388,7 +763,7 @@ export async function GET(
 
       children,
 
-      qualifiers,
+      qualifierAxes,
 
       exclusions,
     });
@@ -407,7 +782,6 @@ export async function GET(
             ? error.message
             : "Erro desconhecido.",
       },
-
       {
         status: 500,
       }
