@@ -1,3 +1,4 @@
+import { getUser } from "@netlify/identity";
 import { NextRequest, NextResponse } from "next/server";
 
 const TOKEN_URL =
@@ -202,10 +203,10 @@ async function getQualifierEntity(
       "@id": entity["@id"],
 
       code:
-        entity.code || null,
+        entity.code || undefined,
 
       classKind:
-        entity.classKind || null,
+        entity.classKind || undefined,
 
       title:
         entity.title || undefined,
@@ -214,7 +215,7 @@ async function getQualifierEntity(
         entity.definition || undefined,
 
       browserUrl:
-        entity.browserUrl || null,
+        entity.browserUrl || undefined,
     };
   } catch (error) {
     console.error(
@@ -234,6 +235,22 @@ export async function GET(
   }
 ) {
   try {
+    // Verifica se o usuário está autenticado
+    const user = await getUser();
+
+    if (!user) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Não autorizado. Faça login para acessar a CIF.",
+        },
+        {
+          status: 401,
+        }
+      );
+    }
+
     const { id } =
       await context.params;
 

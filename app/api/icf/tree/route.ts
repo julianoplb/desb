@@ -1,3 +1,4 @@
+import { getUser } from "@netlify/identity";
 import { NextRequest, NextResponse } from "next/server";
 
 const TOKEN_URL =
@@ -8,9 +9,7 @@ const ICF_BASE_URL =
 
 type WHOEntity = {
   "@id"?: string;
-
   code?: string;
-
   classKind?: string;
 
   title?: {
@@ -24,13 +23,9 @@ type WHOEntity = {
   };
 
   child?: string[];
-
   parent?: string[];
-
   browserUrl?: string;
-
   blockId?: string;
-
   codeRange?: string;
 };
 
@@ -46,8 +41,7 @@ async function getAccessToken(): Promise<string> {
     method: "POST",
 
     headers: {
-      "Content-Type":
-        "application/x-www-form-urlencoded",
+      "Content-Type": "application/x-www-form-urlencoded",
     },
 
     body: new URLSearchParams({
@@ -141,6 +135,22 @@ export async function GET(
   request: NextRequest
 ) {
   try {
+    // Verifica se o usuário está autenticado
+    const user = await getUser();
+
+    if (!user) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Não autorizado. Faça login para acessar a CIF.",
+        },
+        {
+          status: 401,
+        }
+      );
+    }
+
     const token = await getAccessToken();
 
     const searchParams =
@@ -156,6 +166,7 @@ export async function GET(
      * Com ID:
      * consulta uma categoria específica.
      */
+
     const entityUrl = requestedId
       ? `${ICF_BASE_URL}/${requestedId}`
       : ICF_BASE_URL;
@@ -239,19 +250,13 @@ export async function GET(
               ),
 
             code: null,
-
             title: null,
-
             definition: null,
-
             classKind: null,
-
             blockId: null,
-
             codeRange: null,
 
             hasChildren: false,
-
             childCount: 0,
 
             url: normalizeUrl(
@@ -326,7 +331,6 @@ export async function GET(
             ? error.message
             : "Erro desconhecido.",
       },
-
       {
         status: 500,
       }

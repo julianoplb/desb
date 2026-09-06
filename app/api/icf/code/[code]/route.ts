@@ -1,3 +1,4 @@
+import { getUser } from "@netlify/identity";
 import { NextRequest, NextResponse } from "next/server";
 
 const TOKEN_URL =
@@ -11,20 +12,26 @@ async function getAccessToken(): Promise<string> {
   const clientSecret = process.env.WHO_CLIENT_SECRET;
 
   if (!clientId || !clientSecret) {
-    throw new Error("Credenciais da OMS não configuradas.");
+    throw new Error(
+      "Credenciais da OMS não configuradas."
+    );
   }
 
   const response = await fetch(TOKEN_URL, {
     method: "POST",
+
     headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
+      "Content-Type":
+        "application/x-www-form-urlencoded",
     },
+
     body: new URLSearchParams({
       grant_type: "client_credentials",
       scope: "icdapi_access",
       client_id: clientId,
       client_secret: clientSecret,
     }),
+
     cache: "no-store",
   });
 
@@ -39,23 +46,31 @@ async function getAccessToken(): Promise<string> {
   const data = await response.json();
 
   if (!data.access_token) {
-    throw new Error("A OMS não retornou um access_token.");
+    throw new Error(
+      "A OMS não retornou um access_token."
+    );
   }
 
   return data.access_token;
 }
 
-function extractIdFromUrl(url: string | undefined): string | null {
+function extractIdFromUrl(
+  url: string | undefined
+): string | null {
   if (!url) {
     return null;
   }
 
-  const match = url.match(/\/icf\/(\d+)(?:\/.*)?$/);
+  const match = url.match(
+    /\/icf\/(\d+)(?:\/.*)?$/
+  );
 
   return match ? match[1] : null;
 }
 
-function extractLastSegment(url: string): string | null {
+function extractLastSegment(
+  url: string
+): string | null {
   const parts = url.split("/");
 
   return parts[parts.length - 1] || null;
@@ -68,23 +83,45 @@ export async function GET(
   }
 ) {
   try {
-    const { code } = await context.params;
+    // Verifica se o usuário está autenticado
+    const user = await getUser();
 
-    const normalizedCode = decodeURIComponent(code)
-      .trim()
-      .toLowerCase();
+    if (!user) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Não autorizado. Faça login para acessar a CIF.",
+        },
+        {
+          status: 401,
+        }
+      );
+    }
+
+    const { code } =
+      await context.params;
+
+    const normalizedCode =
+      decodeURIComponent(code)
+        .trim()
+        .toLowerCase();
 
     if (!normalizedCode) {
       return NextResponse.json(
         {
           success: false,
-          error: "Código CIF não informado.",
+          error:
+            "Código CIF não informado.",
         },
-        { status: 400 }
+        {
+          status: 400,
+        }
       );
     }
 
-    const token = await getAccessToken();
+    const token =
+      await getAccessToken();
 
     /*
      * 1. Consulta o código diretamente pelo endpoint
@@ -93,33 +130,61 @@ export async function GET(
      * Exemplo:
      * /icf/codeinfo/d450
      */
-    const codeInfoUrl = `${ICF_BASE_URL}/codeinfo/${encodeURIComponent(
-      normalizedCode
-    )}`;
 
-    const codeInfoResponse = await fetch(codeInfoUrl, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "API-Version": "v2",
-        Accept: "application/json",
-        "Accept-Language": "pt",
-      },
-      cache: "no-store",
-    });
+    const codeInfoUrl =
+      `${ICF_BASE_URL}/codeinfo/${encodeURIComponent(
+        normalizedCode
+      )}`;
 
-    const codeInfoData = await codeInfoResponse.json();
+    const codeInfoResponse =
+      await fetch(
+        codeInfoUrl,
+        {
+          headers: {
+            Authorization:
+              `Bearer ${token}`,
+
+            "API-Version":
+              "v2",
+
+            Accept:
+              "application/json",
+
+            "Accept-Language":
+              "pt",
+          },
+
+          cache: "no-store",
+        }
+      );
+
+    const codeInfoData =
+      await codeInfoResponse.json();
 
     if (!codeInfoResponse.ok) {
       return NextResponse.json(
         {
           success: false,
-          code: normalizedCode,
-          message: "Código não encontrado na CIF.",
-          status: codeInfoResponse.status,
+
+          code:
+            normalizedCode,
+
+          message:
+            "Código não encontrado na CIF.",
+
+          status:
+            codeInfoResponse.status,
+
           codeInfoUrl,
-          details: codeInfoData,
+
+          details:
+            codeInfoData,
         },
-        { status: codeInfoResponse.status }
+
+        {
+          status:
+            codeInfoResponse.status,
+        }
       );
     }
 
@@ -127,160 +192,263 @@ export async function GET(
      * 2. O codeinfo normalmente retorna o stemId,
      * que aponta para a entidade da CIF.
      */
+
     const stemId =
       codeInfoData.stemId ||
       codeInfoData["@id"] ||
       null;
 
-    const entityId = extractIdFromUrl(stemId);
+    const entityId =
+      extractIdFromUrl(stemId);
 
     if (!entityId) {
       return NextResponse.json({
         success: false,
-        code: normalizedCode,
+
+        code:
+          normalizedCode,
+
         message:
           "O código foi encontrado, mas a OMS não retornou um ID de entidade reconhecível.",
-        codeInfo: codeInfoData,
+
+        codeInfo:
+          codeInfoData,
       });
     }
 
     /*
      * 3. Agora buscamos a entidade completa da CIF.
      */
-    const entityUrl = `${ICF_BASE_URL}/${entityId}`;
 
-    const entityResponse = await fetch(entityUrl, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "API-Version": "v2",
-        Accept: "application/json",
-        "Accept-Language": "pt",
-      },
-      cache: "no-store",
-    });
+    const entityUrl =
+      `${ICF_BASE_URL}/${entityId}`;
 
-    const entityData = await entityResponse.json();
+    const entityResponse =
+      await fetch(
+        entityUrl,
+        {
+          headers: {
+            Authorization:
+              `Bearer ${token}`,
+
+            "API-Version":
+              "v2",
+
+            Accept:
+              "application/json",
+
+            "Accept-Language":
+              "pt",
+          },
+
+          cache: "no-store",
+        }
+      );
+
+    const entityData =
+      await entityResponse.json();
 
     if (!entityResponse.ok) {
       return NextResponse.json(
         {
           success: false,
-          code: normalizedCode,
+
+          code:
+            normalizedCode,
+
           message:
             "O código foi localizado, mas não foi possível obter os dados completos da categoria.",
-          status: entityResponse.status,
-          codeInfo: codeInfoData,
-          details: entityData,
+
+          status:
+            entityResponse.status,
+
+          codeInfo:
+            codeInfoData,
+
+          details:
+            entityData,
         },
-        { status: entityResponse.status }
+
+        {
+          status:
+            entityResponse.status,
+        }
       );
     }
 
     /*
      * 4. Organizamos os filhos da categoria.
      */
-    const children = Array.isArray(entityData.child)
-      ? entityData.child.map((child: string) => ({
-          id: extractIdFromUrl(child),
-          type: extractLastSegment(child),
-          url: child,
-        }))
-      : [];
+
+    const children =
+      Array.isArray(entityData.child)
+        ? entityData.child.map(
+            (child: string) => ({
+              id:
+                extractIdFromUrl(
+                  child
+                ),
+
+              type:
+                extractLastSegment(
+                  child
+                ),
+
+              url:
+                child,
+            })
+          )
+        : [];
 
     /*
      * 5. Organizamos os qualificadores da CIF.
      */
-    const qualifiers = Array.isArray(
-      entityData.postcoordinationScale
-    )
-      ? entityData.postcoordinationScale.map(
-          (scale: any) => ({
-            axis:
-              scale.axisName?.split("/").pop() || null,
 
-            required:
-              scale.requiredPostcoordination === "true",
+    const qualifiers =
+      Array.isArray(
+        entityData.postcoordinationScale
+      )
+        ? entityData.postcoordinationScale.map(
+            (scale: any) => ({
+              axis:
+                scale.axisName
+                  ?.split("/")
+                  .pop() ||
+                null,
 
-            multiple:
-              scale.allowMultipleValues === "Allowed",
+              required:
+                scale.requiredPostcoordination ===
+                "true",
 
-            entities: Array.isArray(scale.scaleEntity)
-              ? scale.scaleEntity.map((item: string) => ({
-                  id: extractIdFromUrl(item),
-                  url: item,
-                }))
-              : [],
-          })
-        )
-      : [];
+              multiple:
+                scale.allowMultipleValues ===
+                "Allowed",
+
+              entities:
+                Array.isArray(
+                  scale.scaleEntity
+                )
+                  ? scale.scaleEntity.map(
+                      (item: string) => ({
+                        id:
+                          extractIdFromUrl(
+                            item
+                          ),
+
+                        url:
+                          item,
+                      })
+                    )
+                  : [],
+            })
+          )
+        : [];
 
     /*
      * 6. Retorno simplificado para o nosso sistema.
      */
+
     return NextResponse.json({
       success: true,
 
       codeInfo: {
-        code: codeInfoData.code || normalizedCode,
+        code:
+          codeInfoData.code ||
+          normalizedCode,
+
         stemCode:
-          codeInfoData.stemCode || normalizedCode,
+          codeInfoData.stemCode ||
+          normalizedCode,
+
         stemId,
       },
 
       entity: {
-        id: entityId,
+        id:
+          entityId,
 
-        code: entityData.code || normalizedCode,
+        code:
+          entityData.code ||
+          normalizedCode,
 
         title:
-          entityData.title?.["@value"] || null,
+          entityData.title?.[
+            "@value"
+          ] ||
+          null,
 
         definition:
-          entityData.definition?.["@value"] || null,
+          entityData.definition?.[
+            "@value"
+          ] ||
+          null,
 
         classKind:
-          entityData.classKind || null,
+          entityData.classKind ||
+          null,
 
         source:
-          entityData.source || null,
+          entityData.source ||
+          null,
 
         browserUrl:
-          entityData.browserUrl || null,
+          entityData.browserUrl ||
+          null,
       },
 
-      parent: Array.isArray(entityData.parent)
-        ? entityData.parent
-        : [],
+      parent:
+        Array.isArray(
+          entityData.parent
+        )
+          ? entityData.parent
+          : [],
 
       children,
 
       qualifiers,
 
-      exclusions: Array.isArray(entityData.exclusion)
-        ? entityData.exclusion.map((item: any) => ({
-            label:
-              item.label?.["@value"] || null,
+      exclusions:
+        Array.isArray(
+          entityData.exclusion
+        )
+          ? entityData.exclusion.map(
+              (item: any) => ({
+                label:
+                  item.label?.[
+                    "@value"
+                  ] ||
+                  null,
 
-            foundationReference:
-              item.foundationReference || null,
+                foundationReference:
+                  item.foundationReference ||
+                  null,
 
-            linearizationReference:
-              item.linearizationReference || null,
-          }))
-        : [],
+                linearizationReference:
+                  item.linearizationReference ||
+                  null,
+              })
+            )
+          : [],
     });
   } catch (error) {
-    console.error("Erro CIF:", error);
+    console.error(
+      "Erro CIF:",
+      error
+    );
 
     return NextResponse.json(
       {
         success: false,
+
         error:
           error instanceof Error
             ? error.message
             : "Erro desconhecido.",
       },
-      { status: 500 }
+
+      {
+        status: 500,
+      }
     );
   }
 }

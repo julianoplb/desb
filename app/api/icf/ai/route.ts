@@ -1,3 +1,4 @@
+import { getUser } from "@netlify/identity";
 import { NextRequest, NextResponse } from "next/server";
 
 const GEMINI_URL =
@@ -217,6 +218,24 @@ function extractGeminiText(data: any): string | null {
 
 export async function POST(request: NextRequest) {
   try {
+    /*
+     * AUTENTICAÇÃO
+     *
+     * Antes de acessar Gemini ou OMS, verificamos
+     * se existe um usuário autenticado no Netlify Identity.
+     */
+    const user = await getUser();
+
+    if (!user) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Não autorizado. Faça login para utilizar a IA.",
+        },
+        { status: 401 }
+      );
+    }
+
     const geminiApiKey = process.env.GEMINI_API_KEY;
 
     if (!geminiApiKey) {
