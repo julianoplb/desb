@@ -9,9 +9,7 @@ const ICF_BASE_URL =
 
 type WHOEntity = {
   "@id"?: string;
-
   code?: string;
-
   classKind?: string;
 
   title?: {
@@ -25,7 +23,6 @@ type WHOEntity = {
   };
 
   child?: string[];
-
   parent?: string[];
 
   browserUrl?: string;
@@ -45,29 +42,8 @@ type WHOEntity = {
     };
 
     foundationReference?: string;
-
     linearizationReference?: string;
   }[];
-};
-
-type QualifierEntity = {
-  "@id"?: string;
-
-  code?: string;
-
-  classKind?: string;
-
-  title?: {
-    "@language"?: string;
-    "@value"?: string;
-  };
-
-  definition?: {
-    "@language"?: string;
-    "@value"?: string;
-  };
-
-  browserUrl?: string;
 };
 
 async function getAccessToken(): Promise<string> {
@@ -138,94 +114,18 @@ function extractIdFromUrl(
   return match ? match[1] : null;
 }
 
-function extractAxisName(
-  axisName?: string
-): string | null {
-  if (!axisName) {
-    return null;
-  }
-
-  const parts = axisName.split("/");
-
-  return parts[parts.length - 1] || null;
-}
-
-async function getEntity(
-  token: string,
+function createTreeReference(
   url: string
-): Promise<WHOEntity> {
-  const normalizedUrl = normalizeUrl(url);
+) {
+  const normalizedUrl =
+    normalizeUrl(url);
 
-  const response = await fetch(
-    normalizedUrl,
-    {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "API-Version": "v2",
-        Accept: "application/json",
-        "Accept-Language": "pt",
-      },
-
-      cache: "no-store",
-    }
-  );
-
-  const responseText =
-    await response.text();
-
-  if (!response.ok) {
-    throw new Error(
-      `Erro ao consultar ${normalizedUrl}: ${response.status} ${responseText}`
-    );
-  }
-
-  try {
-    return JSON.parse(responseText);
-  } catch {
-    throw new Error(
-      `A OMS retornou uma resposta inválida para ${normalizedUrl}.`
-    );
-  }
-}
-
-async function getQualifierEntity(
-  token: string,
-  url: string
-): Promise<QualifierEntity | null> {
-  try {
-    const entity =
-      await getEntity(
-        token,
-        url
-      );
-
-    return {
-      "@id": entity["@id"],
-
-      code:
-        entity.code || undefined,
-
-      classKind:
-        entity.classKind || undefined,
-
-      title:
-        entity.title || undefined,
-
-      definition:
-        entity.definition || undefined,
-
-      browserUrl:
-        entity.browserUrl || undefined,
-    };
-  } catch (error) {
-    console.error(
-      "Erro ao consultar qualificador:",
-      url,
-      error
-    );
-
-    return null;
-  }
+  return {
+    id: extractIdFromUrl(
+      normalizedUrl
+    ),
+    url: normalizedUrl,
+  };
 }
 
 export async function GET(
@@ -235,7 +135,12 @@ export async function GET(
   }
 ) {
   try {
-    // Verifica se o usuário está autenticado
+    /*
+     * =====================================================
+     * AUTENTICAÇÃO
+     * =====================================================
+     */
+
     const user = await getUser();
 
     if (!user) {
@@ -250,6 +155,12 @@ export async function GET(
         }
       );
     }
+
+    /*
+     * =====================================================
+     * ID
+     * =====================================================
+     */
 
     const { id } =
       await context.params;
@@ -270,8 +181,20 @@ export async function GET(
       );
     }
 
+    /*
+     * =====================================================
+     * TOKEN OMS
+     * =====================================================
+     */
+
     const token =
       await getAccessToken();
+
+    /*
+     * =====================================================
+     * CONSULTA DA ENTIDADE
+     * =====================================================
+     */
 
     const entityUrl =
       `${ICF_BASE_URL}/${normalizedId}`;
@@ -316,8 +239,6 @@ export async function GET(
             "A OMS retornou uma resposta inválida.",
           status:
             response.status,
-          response:
-            responseText,
         },
         {
           status:
@@ -346,116 +267,6 @@ export async function GET(
 
     /*
      * =====================================================
-     * QUALIFICADORES
-     * =====================================================
-     */
-
-    const qualifiers =
-      Array.isArray(
-        data.postcoordinationScale
-      )
-        ? await Promise.all(
-            data.postcoordinationScale.map(
-              async (scale) => {
-                const qualifierUrls =
-                  Array.isArray(
-                    scale.scaleEntity
-                  )
-                    ? scale.scaleEntity
-                    : [];
-
-                const qualifierEntities =
-                  await Promise.all(
-                    qualifierUrls.map(
-                      (url) =>
-                        getQualifierEntity(
-                          token,
-                          url
-                        )
-                    )
-                  );
-
-                return {
-                  axis:
-                    extractAxisName(
-                      scale.axisName
-                    ),
-
-                  required:
-                    scale.requiredPostcoordination ===
-                    "true",
-
-                  multiple:
-                    scale.allowMultipleValues ===
-                    "Allowed",
-
-                  entities:
-                    qualifierEntities
-                      .filter(
-                        (
-                          item
-                        ): item is QualifierEntity =>
-                          item !== null
-                      )
-                      .map(
-                        (
-                          item,
-                          index
-                        ) => ({
-                          id:
-                            extractIdFromUrl(
-                              item[
-                                "@id"
-                              ] ||
-                                qualifierUrls[
-                                  index
-                                ]
-                            ),
-
-                          code:
-                            item.code ||
-                            null,
-
-                          title:
-                            item.title?.[
-                              "@value"
-                            ] ||
-                            null,
-
-                          definition:
-                            item
-                              .definition?.[
-                              "@value"
-                            ] ||
-                            null,
-
-                          classKind:
-                            item.classKind ||
-                            null,
-
-                          url:
-                            normalizeUrl(
-                              item[
-                                "@id"
-                              ] ||
-                                qualifierUrls[
-                                  index
-                                ]
-                            ),
-
-                          browserUrl:
-                            item.browserUrl ||
-                            null,
-                        })
-                      ),
-                };
-              }
-            )
-          )
-        : [];
-
-    /*
-     * =====================================================
      * FILHOS
      * =====================================================
      */
@@ -463,17 +274,7 @@ export async function GET(
     const children =
       Array.isArray(data.child)
         ? data.child.map(
-            (url) => ({
-              id:
-                extractIdFromUrl(
-                  url
-                ),
-
-              url:
-                normalizeUrl(
-                  url
-                ),
-            })
+            createTreeReference
           )
         : [];
 
@@ -486,17 +287,7 @@ export async function GET(
     const parents =
       Array.isArray(data.parent)
         ? data.parent.map(
-            (url) => ({
-              id:
-                extractIdFromUrl(
-                  url
-                ),
-
-              url:
-                normalizeUrl(
-                  url
-                ),
-            })
+            createTreeReference
           )
         : [];
 
@@ -533,6 +324,27 @@ export async function GET(
             })
           )
         : [];
+
+    /*
+     * =====================================================
+     * QUALIFICADORES
+     *
+     * Temporariamente não fazemos consultas adicionais
+     * aqui.
+     *
+     * Primeiro validamos que a seleção da categoria
+     * funciona corretamente.
+     *
+     * A OMS utiliza postcoordinationScale para informar
+     * os eixos de qualificação e seus conjuntos de valores.
+     * Vamos implementar essa parte separadamente depois.
+     * =====================================================
+     */
+
+    const qualifiers = {
+      performance: [],
+      capacity: [],
+    };
 
     /*
      * =====================================================
