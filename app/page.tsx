@@ -5,10 +5,15 @@ import ICFApp from "./ICFApp";
 export const dynamic = "force-dynamic";
 
 export default async function Home() {
-  const user = await getUser();
+  const isDevelopment =
+    process.env.NODE_ENV === "development";
 
-  if (!user) {
-    redirect("/login");
+  if (!isDevelopment) {
+    const user = await getUser();
+
+    if (!user) {
+      redirect("/login");
+    }
   }
 
   return <ICFApp />;

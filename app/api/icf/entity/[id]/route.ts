@@ -1,4 +1,3 @@
-import { getUser } from "@netlify/identity";
 import { NextRequest, NextResponse } from "next/server";
 
 const TOKEN_URL =
@@ -7,12 +6,13 @@ const TOKEN_URL =
 const ICF_BASE_URL =
   "https://id.who.int/icd/release/11/2026-01/icf";
 
+export const dynamic = "force-dynamic";
+
 type WHOEntity = {
   "@id"?: string;
-
   code?: string;
-
   classKind?: string;
+  blockId?: string;
 
   title?: {
     "@language"?: string;
@@ -25,9 +25,7 @@ type WHOEntity = {
   };
 
   child?: string[];
-
   parent?: string[];
-
   browserUrl?: string;
 
   postcoordinationScale?: {
@@ -45,17 +43,15 @@ type WHOEntity = {
     };
 
     foundationReference?: string;
-
     linearizationReference?: string;
   }[];
 };
 
 type QualifierEntity = {
   "@id"?: string;
-
   code?: string;
-
   classKind?: string;
+  blockId?: string;
 
   title?: {
     "@language"?: string;
@@ -68,7 +64,6 @@ type QualifierEntity = {
   };
 
   browserUrl?: string;
-
   child?: string[];
 };
 
@@ -78,6 +73,7 @@ type QualifierOption = {
   title: string | null;
   definition: string | null;
   classKind: string | null;
+  blockId: string | null;
   url: string;
   browserUrl: string | null;
 };
@@ -86,11 +82,13 @@ type QualifierAxis = {
   axis: string | null;
   axisName: string | null;
   required: boolean;
+
   multiple:
     | "AllowAlways"
     | "NotAllowed"
     | "AllowedExceptFromSameBlock"
     | null;
+
   scaleEntities: string[];
   options: QualifierOption[];
 };
@@ -261,6 +259,9 @@ async function getQualifierEntity(
       classKind:
         entity.classKind || undefined,
 
+      blockId:
+        entity.blockId || undefined,
+
       title:
         entity.title || undefined,
 
@@ -289,7 +290,8 @@ async function getQualifierEntity(
 async function collectQualifierOptions(
   token: string,
   url: string,
-  visited: Set<string>
+  visited: Set<string>,
+  currentBlockId: string | null = null
 ): Promise<QualifierOption[]> {
   const normalizedUrl =
     normalizeUrl(url);
@@ -309,6 +311,17 @@ async function collectQualifierOptions(
   if (!entity) {
     return [];
   }
+
+  /*
+   * Se a entidade atual for um bloco e
+   * possuir blockId, esse passa a ser o
+   * bloco de origem dos descendentes.
+   */
+  const blockId =
+    entity.classKind === "block" &&
+    entity.blockId
+      ? entity.blockId
+      : currentBlockId;
 
   const children =
     Array.isArray(entity.child)
@@ -344,6 +357,8 @@ async function collectQualifierOptions(
         classKind:
           entity.classKind || null,
 
+        blockId,
+
         url:
           normalizeUrl(
             entity["@id"] ||
@@ -371,7 +386,8 @@ async function collectQualifierOptions(
           collectQualifierOptions(
             token,
             childUrl,
-            visited
+            visited,
+            blockId
           )
       )
     );
@@ -479,29 +495,6 @@ export async function GET(
   try {
     /*
      * =====================================================
-     * AUTENTICAÇÃO
-     * =====================================================
-     */
-
-    const user =
-      await getUser();
-
-    if (!user) {
-      return NextResponse.json(
-        {
-          success: false,
-
-          error:
-            "Não autorizado. Faça login para acessar a CIF.",
-        },
-        {
-          status: 401,
-        }
-      );
-    }
-
-    /*
-     * =====================================================
      * ID
      * =====================================================
      */
@@ -509,7 +502,7 @@ export async function GET(
     const { id } =
       await context.params;
 
-    const normalizedId =
+    let normalizedId =
       decodeURIComponent(id).trim();
 
     if (!normalizedId) {
@@ -534,6 +527,62 @@ export async function GET(
 
     const token =
       await getAccessToken();
+
+    /*
+     * =====================================================
+     * RESOLUÇÃO DO IDENTIFICADOR
+     * =====================================================
+     *
+     * A rota normalmente recebe o ID numérico da entidade OMS.
+     * Para tornar a edição robusta, também aceitamos o código CIF
+     * (por exemplo, d450 ou e510). Isso permite recuperar
+     * classificações antigas que foram salvas antes de o entityId
+     * passar a ser persistido.
+     */
+    if (/^[bsde]\d+$/i.test(normalizedId)) {
+      const codeInfoResponse = await fetch(
+        `${ICF_BASE_URL}/codeinfo/${encodeURIComponent(normalizedId.toLowerCase())}`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "API-Version": "v2",
+            Accept: "application/json",
+            "Accept-Language": "pt",
+          },
+          cache: "no-store",
+        }
+      );
+
+      if (!codeInfoResponse.ok) {
+        return NextResponse.json(
+          {
+            success: false,
+            error: "Não foi possível localizar o código CIF na OMS.",
+          },
+          { status: 404 }
+        );
+      }
+
+      const codeInfo = await codeInfoResponse.json();
+      const stemId =
+        typeof codeInfo?.stemId === "string"
+          ? codeInfo.stemId
+          : "";
+
+      const match = stemId.match(/\/icf\/(\d+)(?:\/.*)?$/);
+
+      if (!match) {
+        return NextResponse.json(
+          {
+            success: false,
+            error: "A OMS não retornou o ID da categoria CIF.",
+          },
+          { status: 404 }
+        );
+      }
+
+      normalizedId = match[1];
+    }
 
     /*
      * =====================================================
@@ -622,17 +671,6 @@ export async function GET(
      * =====================================================
      * QUALIFICADORES / POSTCOORDENAÇÃO
      * =====================================================
-     *
-     * Aqui usamos diretamente o
-     * postcoordinationScale informado
-     * pela OMS para aquela categoria.
-     *
-     * Isso permite descobrir dinamicamente:
-     *
-     * - quais eixos são aplicáveis
-     * - quais são obrigatórios
-     * - se podem existir múltiplos valores
-     * - quais conjuntos de qualificadores são permitidos
      */
 
     const qualifierAxes =

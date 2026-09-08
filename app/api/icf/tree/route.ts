@@ -11,17 +11,14 @@ type WHOEntity = {
   "@id"?: string;
   code?: string;
   classKind?: string;
-
   title?: {
     "@language"?: string;
     "@value"?: string;
   };
-
   definition?: {
     "@language"?: string;
     "@value"?: string;
   };
-
   child?: string[];
   parent?: string[];
   browserUrl?: string;
@@ -39,18 +36,15 @@ async function getAccessToken(): Promise<string> {
 
   const response = await fetch(TOKEN_URL, {
     method: "POST",
-
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
     },
-
     body: new URLSearchParams({
       grant_type: "client_credentials",
       scope: "icdapi_access",
       client_id: clientId,
       client_secret: clientSecret,
     }),
-
     cache: "no-store",
   });
 
@@ -65,9 +59,7 @@ async function getAccessToken(): Promise<string> {
   const data = await response.json();
 
   if (!data.access_token) {
-    throw new Error(
-      "A OMS não retornou um access_token."
-    );
+    throw new Error("A OMS não retornou um access_token.");
   }
 
   return data.access_token;
@@ -75,21 +67,14 @@ async function getAccessToken(): Promise<string> {
 
 function normalizeUrl(url: string): string {
   if (url.startsWith("http://")) {
-    return url.replace(
-      "http://",
-      "https://"
-    );
+    return url.replace("http://", "https://");
   }
 
   return url;
 }
 
-function extractIdFromUrl(
-  url: string
-): string | null {
-  const match = url.match(
-    /\/icf\/(\d+)(?:\/.*)?$/
-  );
+function extractIdFromUrl(url: string): string | null {
+  const match = url.match(/\/icf\/(\d+)(?:\/.*)?$/);
 
   return match ? match[1] : null;
 }
@@ -100,19 +85,15 @@ async function getEntity(
 ): Promise<WHOEntity> {
   const normalizedUrl = normalizeUrl(url);
 
-  const response = await fetch(
-    normalizedUrl,
-    {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "API-Version": "v2",
-        Accept: "application/json",
-        "Accept-Language": "pt",
-      },
-
-      cache: "no-store",
-    }
-  );
+  const response = await fetch(normalizedUrl, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "API-Version": "v2",
+      Accept: "application/json",
+      "Accept-Language": "pt",
+    },
+    cache: "no-store",
+  });
 
   const responseText = await response.text();
 
@@ -131,24 +112,28 @@ async function getEntity(
   }
 }
 
-export async function GET(
-  request: NextRequest
-) {
+export async function GET(request: NextRequest) {
   try {
-    // Verifica se o usuário está autenticado
-    const user = await getUser();
+    const isDevelopment =
+      process.env.NODE_ENV === "development";
 
-    if (!user) {
-      return NextResponse.json(
-        {
-          success: false,
-          error:
-            "Não autorizado. Faça login para acessar a CIF.",
-        },
-        {
-          status: 401,
-        }
-      );
+    // Em produção, continua exigindo login.
+    // Em desenvolvimento local, o login fica desativado.
+    if (!isDevelopment) {
+      const user = await getUser();
+
+      if (!user) {
+        return NextResponse.json(
+          {
+            success: false,
+            error:
+              "Não autorizado. Faça login para acessar a CIF.",
+          },
+          {
+            status: 401,
+          }
+        );
+      }
     }
 
     const token = await getAccessToken();
@@ -166,7 +151,6 @@ export async function GET(
      * Com ID:
      * consulta uma categoria específica.
      */
-
     const entityUrl = requestedId
       ? `${ICF_BASE_URL}/${requestedId}`
       : ICF_BASE_URL;
@@ -176,9 +160,7 @@ export async function GET(
       entityUrl
     );
 
-    const childUrls = Array.isArray(
-      entity.child
-    )
+    const childUrls = Array.isArray(entity.child)
       ? entity.child
       : [];
 
@@ -192,23 +174,16 @@ export async function GET(
             );
 
           return {
-            id:
-              extractIdFromUrl(
-                childUrl
-              ),
+            id: extractIdFromUrl(childUrl),
 
             code:
               child.code || null,
 
             title:
-              child.title?.[
-                "@value"
-              ] || null,
+              child.title?.["@value"] || null,
 
             definition:
-              child.definition?.[
-                "@value"
-              ] || null,
+              child.definition?.["@value"] || null,
 
             classKind:
               child.classKind || null,
@@ -220,21 +195,16 @@ export async function GET(
               child.codeRange || null,
 
             hasChildren:
-              Array.isArray(
-                child.child
-              ) &&
+              Array.isArray(child.child) &&
               child.child.length > 0,
 
             childCount:
-              Array.isArray(
-                child.child
-              )
+              Array.isArray(child.child)
                 ? child.child.length
                 : 0,
 
-            url: normalizeUrl(
-              childUrl
-            ),
+            url:
+              normalizeUrl(childUrl),
           };
         } catch (error) {
           console.error(
@@ -244,10 +214,7 @@ export async function GET(
           );
 
           return {
-            id:
-              extractIdFromUrl(
-                childUrl
-              ),
+            id: extractIdFromUrl(childUrl),
 
             code: null,
             title: null,
@@ -259,9 +226,8 @@ export async function GET(
             hasChildren: false,
             childCount: 0,
 
-            url: normalizeUrl(
-              childUrl
-            ),
+            url:
+              normalizeUrl(childUrl),
 
             error:
               error instanceof Error
@@ -286,14 +252,10 @@ export async function GET(
           entity.code || null,
 
         title:
-          entity.title?.[
-            "@value"
-          ] || null,
+          entity.title?.["@value"] || null,
 
         definition:
-          entity.definition?.[
-            "@value"
-          ] || null,
+          entity.definition?.["@value"] || null,
 
         classKind:
           entity.classKind || null,

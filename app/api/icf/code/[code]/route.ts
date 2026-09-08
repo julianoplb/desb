@@ -128,7 +128,7 @@ export async function GET(
      * oficial codeinfo da OMS.
      *
      * Exemplo:
-     * /icf/codeinfo/d450
+     * /codeinfo/d450
      */
 
     const codeInfoUrl =
@@ -304,12 +304,17 @@ export async function GET(
      * 5. Organizamos os qualificadores da CIF.
      */
 
+    /*
+     * Os dados abaixo vêm diretamente da API externa da OMS
+     * e possuem estrutura dinâmica.
+     */
     const qualifiers =
       Array.isArray(
         entityData.postcoordinationScale
       )
-        ? entityData.postcoordinationScale.map(
-            (scale: any) => ({
+       ? entityData.postcoordinationScale.map(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (scale: any) => ({
               axis:
                 scale.axisName
                   ?.split("/")
@@ -407,11 +412,16 @@ export async function GET(
 
       qualifiers,
 
+      /*
+       * A resposta de exclusões também vem de uma estrutura
+       * dinâmica da API da OMS.
+       */
       exclusions:
         Array.isArray(
           entityData.exclusion
         )
           ? entityData.exclusion.map(
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
               (item: any) => ({
                 label:
                   item.label?.[
