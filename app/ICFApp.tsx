@@ -86,7 +86,6 @@ type EntityData = {
 
 type EntityResponse = {
   success: boolean;
-  error?: string;
   entity: EntityData;
   parents: TreeNode[];
   children: TreeNode[];
@@ -239,7 +238,8 @@ export default function Home() {
   const [highlightedClassificationId, setHighlightedClassificationId] =
     useState<string | null>(null);
   const classificationsRef = useRef<HTMLElement | null>(null);
-  const editorRef = useRef<HTMLDivElement | null>(null);
+  const editorRef = useRef<HTMLElement | null>(null);
+  const skipNextEditorAutoScrollRef = useRef(false);
 
   const [reportOpen, setReportOpen] = useState(false);
   const [reportView, setReportView] = useState<"hybrid" | "technical">("hybrid");
@@ -249,6 +249,7 @@ export default function Home() {
 
   const [aiText, setAiText] = useState("");
   const [isListening, setIsListening] = useState(false);
+  const isListeningRef = useRef(false);
   const speechRecognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const [aiSuggestions, setAiSuggestions] = useState<
     AISuggestion[]
@@ -266,8 +267,14 @@ export default function Home() {
     if (typeof window === "undefined") return;
 
     if (isListening) {
-      speechRecognitionRef.current?.stop();
+      // Um segundo clique encerra explicitamente a sessão.
+      // Limpamos a referência antes do stop para impedir que o onend
+      // reinicie o reconhecimento automaticamente.
+      const recognition = speechRecognitionRef.current;
+      speechRecognitionRef.current = null;
+      isListeningRef.current = false;
       setIsListening(false);
+      recognition?.stop();
       return;
     }
 
@@ -289,17 +296,43 @@ export default function Home() {
 
     const recognition = new SpeechRecognition();
     recognition.lang = "pt-BR";
-    recognition.continuous = false;
+    // O microfone permanece aberto até o usuário clicar novamente.
+    // Alguns navegadores encerram uma sessão silenciosa automaticamente;
+    // o onend abaixo reinicia a mesma sessão enquanto o usuário não clicar
+    // para parar.
+    recognition.continuous = true;
     recognition.interimResults = false;
 
-    recognition.onresult = (event) => {
-      const transcript = Array.from({ length: event.results.length })
-        .map((_, index) => event.results[index])
-        .filter((result) => result?.isFinal)
-        .map((result) => result[0]?.transcript || "")
-        .join(" ")
-        .trim();
+    // O SpeechRecognition pode devolver novamente, após um `onend` + `start`,
+    // resultados que já foram entregues anteriormente. Mantemos quantos
+    // resultados já processamos para adicionar somente a fala nova ao campo.
+    let processedResultCount = 0;
 
+    recognition.onresult = (event) => {
+      // Se o navegador reiniciar a lista de resultados ao chamar start(),
+      // a quantidade volta a ser menor e começamos a contar a nova sessão.
+      if (event.results.length < processedResultCount) {
+        processedResultCount = 0;
+      }
+
+      const startIndex = Math.max(
+        processedResultCount,
+        typeof event.resultIndex === "number" ? event.resultIndex : 0
+      );
+
+      const newTranscripts: string[] = [];
+
+      for (let index = startIndex; index < event.results.length; index += 1) {
+        const result = event.results[index];
+        if (!result?.isFinal) continue;
+
+        const text = result[0]?.transcript?.trim() || "";
+        if (text) newTranscripts.push(text);
+      }
+
+      processedResultCount = event.results.length;
+
+      const transcript = newTranscripts.join(" ").trim();
       if (!transcript) return;
 
       setAiText((current) => {
@@ -309,6 +342,11 @@ export default function Home() {
     };
 
     recognition.onerror = (event) => {
+      if (event.error === "aborted") {
+        return;
+      }
+
+      isListeningRef.current = false;
       setIsListening(false);
       speechRecognitionRef.current = null;
 
@@ -322,18 +360,50 @@ export default function Home() {
     };
 
     recognition.onend = () => {
+      // O navegador pode encerrar uma sessão silenciosa mesmo com
+      // continuous=true. Se o usuário ainda estiver gravando, reabre
+      // automaticamente para manter o comportamento de "1 clique abre,
+      // 1 clique fecha".
+      if (isListeningRef.current && speechRecognitionRef.current === recognition) {
+        window.setTimeout(() => {
+          if (!isListeningRef.current || speechRecognitionRef.current !== recognition) {
+            return;
+          }
+
+          try {
+            recognition.start();
+          } catch {
+            // Alguns navegadores podem considerar a sessão ainda ativa.
+            // Nesse caso, aguardamos o próximo evento sem interromper a UI.
+          }
+        }, 150);
+        return;
+      }
+
+      if (speechRecognitionRef.current === recognition) {
+        speechRecognitionRef.current = null;
+      }
+      isListeningRef.current = false;
       setIsListening(false);
-      speechRecognitionRef.current = null;
     };
 
     speechRecognitionRef.current = recognition;
+    isListeningRef.current = true;
     setAiError(null);
     setIsListening(true);
-    recognition.start();
+    try {
+      recognition.start();
+    } catch {
+      speechRecognitionRef.current = null;
+      isListeningRef.current = false;
+      setIsListening(false);
+      setAiError("Não foi possível iniciar o microfone. Tente novamente.");
+    }
   }
 
   useEffect(() => {
     return () => {
+      isListeningRef.current = false;
       speechRecognitionRef.current?.abort();
       speechRecognitionRef.current = null;
     };
@@ -408,13 +478,7 @@ export default function Home() {
     try {
       setTreeError(null);
 
-      // Categorias finais não abrem um novo nível.
-      // Para elas, a única ação disponível na árvore é "Adicionar".
-      if (!node.hasChildren) {
-        return;
-      }
-
-      if (!childrenByNode[node.id]) {
+      if (node.hasChildren && !childrenByNode[node.id]) {
         setLoadingChildren((previous) => ({
           ...previous,
           [node.id]: true,
@@ -541,13 +605,27 @@ export default function Home() {
         ([, qualifier]) => qualifier !== null
       );
 
-    const existingIndex = classifications.findIndex(
-      (item) => item.code === entity.code
-    );
+    // O botão deve decidir entre "Adicionar" e "Salvar" olhando para a
+    // categoria que está atualmente aberta no editor. Depois que a primeira
+    // inclusão acontece, essa mesma categoria já existe na lista; portanto,
+    // o clique seguinte é imediatamente um SALVAR, sem depender de uma
+    // atualização intermediária de editingClassificationId.
+    const existingIndex = classifications.findIndex((item) => {
+      const itemCode = item.code?.trim().toLowerCase();
+      const entityCode = entity.code?.trim().toLowerCase();
+
+      return (
+        Boolean(entityCode && itemCode && entityCode === itemCode) ||
+        Boolean(entity.id && item.entityId && entity.id === item.entityId)
+      );
+    });
+
+    const isSavingExistingClassification =
+      existingIndex >= 0;
 
     const classificationId =
       existingIndex === -1
-        ? entity.id
+        ? `${entity.id}-${Date.now()}`
         : classifications[existingIndex].id;
 
     const classification: Classification = {
@@ -616,21 +694,44 @@ export default function Home() {
     });
 
     setHighlightedClassificationId(classificationId);
-    setEditingClassificationId(null);
-    setSelectedEntity(null);
-    setSelectedId(null);
-    setSelectedQualifiers({});
-    setSelectedQualifierPercentages({});
-    setEvaluatingQualifierRules({});
-    setExpandedCategoryInfo(false);
-    setExpandedQualifierRules({});
 
-    window.setTimeout(() => {
-      classificationsRef.current?.scrollIntoView({
-        behavior: "smooth",
-        block: "start",
-      });
-    }, 50);
+    if (isSavingExistingClassification) {
+      // Ao SALVAR alterações, fechamos o editor e voltamos para a lista
+      // inferior, como no fluxo original. A classificação já está salva.
+      setEditingClassificationId(null);
+      setSelectedEntity(null);
+      setSelectedId(null);
+      setSelectedQualifiers({});
+      setSelectedQualifierPercentages({});
+      setEvaluatingQualifierRules({});
+      setExpandedCategoryInfo(false);
+      setExpandedQualifierRules({});
+
+      window.setTimeout(() => {
+        classificationsRef.current?.scrollIntoView({
+          behavior: "smooth",
+          block: "start",
+        });
+      }, 50);
+    } else {
+      // Ao ADICIONAR pela primeira vez, fechamos o editor e levamos
+      // diretamente para a classificação recém-adicionada.
+      setEditingClassificationId(null);
+      setSelectedEntity(null);
+      setSelectedId(null);
+      setSelectedQualifiers({});
+      setSelectedQualifierPercentages({});
+      setEvaluatingQualifierRules({});
+      setExpandedCategoryInfo(false);
+      setExpandedQualifierRules({});
+
+      window.setTimeout(() => {
+        classificationsRef.current?.scrollIntoView({
+          behavior: "smooth",
+          block: "start",
+        });
+      }, 50);
+    }
 
     window.setTimeout(() => {
       setHighlightedClassificationId(null);
@@ -781,6 +882,13 @@ export default function Home() {
       return;
     }
 
+    // Depois do primeiro "Adicionar à lista", não devemos reposicionar a
+    // página: o editor já está aberto exatamente onde o usuário estava.
+    if (skipNextEditorAutoScrollRef.current) {
+      skipNextEditorAutoScrollRef.current = false;
+      return;
+    }
+
     const timeout = window.setTimeout(() => {
       editorRef.current?.scrollIntoView({
         behavior: "smooth",
@@ -915,7 +1023,7 @@ export default function Home() {
     );
 
     const classification: Classification = {
-      id: `ai-${suggestion.code}`,
+      id: `ai-${suggestion.code}-${Date.now()}`,
       code: suggestion.code,
       title:
         suggestion.title ||
@@ -946,8 +1054,25 @@ export default function Home() {
    * carregamos seus detalhes para que o profissional os
    * preencha antes da inclusão definitiva.
    */
+  function isSameICFCategory(
+    code?: string | null,
+    entityId?: string | null
+  ) {
+    const normalizedCode = code?.trim().toLowerCase();
+
+    return classifications.some((item) => {
+      const itemCode = item.code?.trim().toLowerCase();
+
+      return (
+        Boolean(normalizedCode && itemCode && normalizedCode === itemCode) ||
+        Boolean(entityId && item.entityId && entityId === item.entityId)
+      );
+    });
+  }
+
   async function addFromTree(node: TreeNode) {
     if (!node.code) {
+      setTreeError("Esta categoria não possui um código CIF válido.");
       return;
     }
 
@@ -958,51 +1083,183 @@ export default function Home() {
       setSelectedQualifiers({});
       setSelectedQualifierPercentages({});
       setEvaluatingQualifierRules({});
+      setEditingClassificationId(null);
 
-      const response = await fetch(
-        `/api/icf/entity/${encodeURIComponent(node.id)}`
+      /*
+       * IMPORTANTE:
+       * Para folhas como b198/b199, o id interno da árvore nem sempre é
+       * o identificador aceito pela rota de entidade. O código CIF é a
+       * referência estável da categoria. Por isso tentamos primeiro pelo
+       * código (b198, b199, etc.) e só usamos o id da árvore como fallback.
+       */
+      const lookupValues = Array.from(
+        new Set([node.code, node.id].filter(Boolean))
       );
 
-      const data: EntityResponse = await response.json();
+      let data: EntityResponse | null = null;
+      let lastError = "";
 
-      if (!response.ok || !data.success) {
+      for (const lookup of lookupValues) {
+        try {
+          const response = await fetch(
+            `/api/icf/entity/${encodeURIComponent(lookup)}`
+          );
+
+          const candidate: EntityResponse = await response.json();
+
+          if (
+            response.ok &&
+            candidate.success &&
+            candidate.entity
+          ) {
+            data = candidate;
+            break;
+          }
+
+          lastError =
+            candidate?.error ||
+            `Não foi possível carregar a categoria (HTTP ${response.status}).`;
+        } catch (error) {
+          lastError =
+            error instanceof Error
+              ? error.message
+              : "Erro ao consultar a categoria.";
+        }
+      }
+
+      if (!data) {
         throw new Error(
-          "Não foi possível carregar a categoria para adicioná-la."
+          lastError ||
+            "Não foi possível carregar a categoria para adicioná-la."
         );
       }
 
-      setSelectedEntity(data);
+      /*
+       * A resposta deve trazer o código, mas mantemos os dados da própria
+       * árvore como fallback. Assim, uma resposta parcial da API não faz
+       * o botão parecer que não funcionou.
+       */
+      const normalizedData: EntityResponse = {
+        ...data,
+        entity: {
+          ...data.entity,
+          id: data.entity.id || node.id,
+          code: data.entity.code || node.code,
+          title: data.entity.title || node.title,
+          definition: data.entity.definition || node.definition,
+          classKind: data.entity.classKind || node.classKind,
+          browserUrl: data.entity.browserUrl || node.url || null,
+        },
+      };
 
-      const alreadyAdded = classifications.some(
-        (item) => item.code === data.entity.code
+      setSelectedEntity(normalizedData);
+      setSelectedId(normalizedData.entity.id);
+
+      const existingClassification = classifications.find(
+        (item) =>
+          item.code === normalizedData.entity.code ||
+          item.entityId === normalizedData.entity.id
       );
 
-      if (alreadyAdded) {
+      /*
+       * Se já existe, carregamos diretamente os dados salvos no editor.
+       * Não fazemos uma segunda chamada à API e não usamos o estado anterior
+       * de selectedEntity, evitando o problema de o painel ficar "preso"
+       * na categoria pai.
+       */
+      if (existingClassification) {
+        const editPlan = buildQualifierPlan(
+          normalizedData.entity.code,
+          normalizedData.qualifierAxes,
+          true
+        );
+
+        const restoredQualifiers: Record<string, Qualifier | null> = {};
+        const restoredPercentages: Record<string, number> = {};
+
+        for (const rule of editPlan.rules) {
+          const qualifier =
+            existingClassification.qualifiers?.[rule.key] || null;
+
+          restoredQualifiers[rule.key] = qualifier;
+
+          if (
+            qualifier &&
+            (rule.uiKind === "numeric" ||
+              rule.uiKind === "signedNumeric")
+          ) {
+            const savedPercentage =
+              existingClassification.qualifierPercentages?.[rule.key];
+            const numericValue = getQualifierNumericValue(qualifier);
+
+            if (savedPercentage !== undefined) {
+              restoredPercentages[rule.key] = savedPercentage;
+            } else if (numericValue !== null) {
+              restoredPercentages[rule.key] =
+                rule.uiKind === "signedNumeric"
+                  ? signedICFValueToPercentage(numericValue)
+                  : icfValueToPercentage(numericValue);
+            }
+          }
+        }
+
+        setSelectedQualifiers(restoredQualifiers);
+        setSelectedQualifierPercentages(restoredPercentages);
+
+        setEvaluatingQualifierRules(
+          Object.fromEntries(
+            editPlan.rules.map((rule) => {
+              const qualifier = existingClassification.qualifiers?.[rule.key];
+              const isSpecial = /(?:8|9)$/.test(qualifier?.code || "");
+              const hasNumericValue =
+                qualifier != null &&
+                getQualifierNumericValue(qualifier) !== null;
+
+              return [rule.key, hasNumericValue && !isSpecial];
+            })
+          )
+        );
+
+        setEditingClassificationId(existingClassification.id);
+
+        window.setTimeout(() => {
+          editorRef.current?.scrollIntoView({
+            behavior: "smooth",
+            block: "start",
+          });
+        }, 50);
+
         return;
       }
 
-      const hasRequiredQualifiers = data.qualifierAxes.some(
-        (axis) => axis.required
+      const editPlan = buildQualifierPlan(
+        normalizedData.entity.code,
+        normalizedData.qualifierAxes,
+        true
       );
 
-      if (!hasRequiredQualifiers && data.entity.code && data.entity.title) {
-        const classification: Classification = {
-          id: `${data.entity.id}-${Date.now()}`,
-          code: data.entity.code,
-          title: data.entity.title,
-          definition: data.entity.definition,
-          source: "manual",
-          entityId: data.entity.id,
-          qualifiers: {},
-        };
+      const hasRequiredQualifiers = editPlan.rules.some(
+        (rule) => rule.required
+      );
 
-        setClassifications((previous) => [
-          ...previous,
-          classification,
-        ]);
+      /*
+       * Mesmo quando não há qualificadores obrigatórios, o primeiro clique
+       * em "+ Adicionar" deve levar o profissional ao editor da categoria.
+       * A inclusão definitiva continua sendo feita pelo botão do editor.
+       */
+      if (
+        !hasRequiredQualifiers &&
+        normalizedData.entity.code &&
+        normalizedData.entity.title
+      ) {
+        const editorClassificationId =
+          `${normalizedData.entity.id || normalizedData.entity.code}-${Date.now()}`;
+
+        skipNextEditorAutoScrollRef.current = false;
+        setEditingClassificationId(editorClassificationId);
       }
     } catch (error) {
-      console.error(error);
+      console.error("Erro ao adicionar categoria CIF:", error);
 
       setTreeError(
         error instanceof Error
@@ -1022,15 +1279,15 @@ export default function Home() {
   function TreeLevel({ nodes }: { nodes: TreeNode[] }) {
     return (
       <div className="space-y-2">
-        {nodes.map((node) => {
+        {nodes.map((node, nodeIndex) => {
           const loading = Boolean(loadingChildren[node.id]);
           const alreadyAdded = node.code
-            ? classifications.some((item) => item.code === node.code)
+            ? isSameICFCategory(node.code, node.id)
             : false;
 
           return (
             <div
-              key={node.id}
+              key={`${node.id}-${node.code || "sem-codigo"}-${nodeIndex}`}
               className={`group rounded-xl border p-3 transition ${
                 selectedId === node.id
                   ? "border-purple-200 bg-purple-50"
@@ -1040,7 +1297,11 @@ export default function Home() {
               <div className="flex items-center gap-3">
                 <button
                   type="button"
-                  onClick={() => void openTreeNode(node)}
+                  onClick={() =>
+                    node.hasChildren
+                      ? void openTreeNode(node)
+                      : void addFromTree(node)
+                  }
                   disabled={loading}
                   className="flex min-w-0 flex-1 items-center gap-3 text-left"
                 >
@@ -1080,22 +1341,21 @@ export default function Home() {
                 </button>
 
                 {node.code && (
-                  alreadyAdded ? (
-                    <span className="hidden shrink-0 rounded-md bg-green-50 px-3 py-1.5 text-xs font-semibold text-green-700 sm:inline-flex">
-                      ✓ Adicionado
-                    </span>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        void addFromTree(node);
-                      }}
-                      className="shrink-0 rounded-lg border border-purple-200 bg-purple-50 px-3 py-2 text-xs font-bold text-purple-700 transition hover:border-purple-300 hover:bg-purple-100"
-                    >
-                      + Adicionar
-                    </button>
-                  )
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void addFromTree(node);
+                    }}
+                    disabled={loading}
+                    className={`shrink-0 rounded-lg border px-3 py-2 text-xs font-bold transition ${
+                      alreadyAdded
+                        ? "border-blue-200 bg-blue-50 text-blue-700 hover:border-blue-300 hover:bg-blue-100"
+                        : "border-purple-200 bg-purple-50 text-purple-700 hover:border-purple-300 hover:bg-purple-100"
+                    } disabled:cursor-not-allowed disabled:opacity-60`}
+                  >
+                    {alreadyAdded ? "✎ Editar" : "+ Adicionar"}
+                  </button>
                 )}
               </div>
             </div>
@@ -1110,23 +1370,33 @@ export default function Home() {
       selectedEntity?.entity?.code
     );
 
-  const qualifierPlan: QualifierPlan | null =
-    selectedEntity?.entity?.code
-      ? buildQualifierPlan(
-          selectedEntity.entity.code,
-          selectedEntity.qualifierAxes,
-          true
-        )
-      : null;
+  const qualifierPlan: QualifierPlan | null = useMemo(() => {
+    if (!selectedEntity?.entity?.code) {
+      return null;
+    }
+
+    return buildQualifierPlan(
+      selectedEntity.entity.code,
+      selectedEntity.qualifierAxes,
+      true
+    );
+  }, [selectedEntity]);
 
   const hasRequiredQualifierMissing =
-  qualifierPlan
-    ? qualifierPlan.rules.some(
+    useMemo(() => {
+      if (!qualifierPlan) {
+        return false;
+      }
+
+      return qualifierPlan.rules.some(
         (rule) =>
           rule.required &&
           selectedQualifiers[rule.key] == null
-      )
-    : false;
+      );
+    }, [
+      qualifierPlan,
+      selectedQualifiers,
+    ]);
 
   const canAddManual =
     useMemo(() => {
@@ -1881,7 +2151,10 @@ export default function Home() {
                       CIF
                     </button>
                     {treePath.map((node, index) => (
-                      <span key={node.id} className="flex items-center gap-1">
+                      <span
+                        key={`${node.id}-${node.code || "sem-codigo"}-${index}`}
+                        className="flex items-center gap-1"
+                      >
                         <span className="text-gray-400">›</span>
                         <button
                           type="button"
@@ -1931,16 +2204,6 @@ export default function Home() {
                       ? rootNodes
                       : childrenByNode[treePath[treePath.length - 1].id] || [];
 
-                  if (treePath.length > 0 && currentNodes.length === 0 && !loadingChildren[treePath[treePath.length - 1].id]) {
-                    return (
-                      <div className="rounded-xl border border-gray-200 bg-gray-50 p-5 text-center">
-                        <div className="text-2xl">✓</div>
-                        <div className="mt-2 text-sm font-semibold text-gray-700">Categoria final</div>
-                        <div className="mt-1 text-xs text-gray-500">Use “Adicionar” na categoria selecionada para incluí-la na classificação.</div>
-                      </div>
-                    );
-                  }
-
                   return <TreeLevel nodes={currentNodes} />;
                 })()}
               </div>
@@ -1980,6 +2243,9 @@ export default function Home() {
               {selectedEntity &&
                 !loadingEntity && (
                   <div>
+                    {/** Para categorias estruturais (s), usamos uma apresentação mais compacta
+                     * dos qualificadores para aproveitar melhor a altura da tela. */}
+                    {/** Mantemos b/d/e exatamente com o layout atual. */}
                     {/* CABEÇALHO COMPACTO */}
                     <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
                       <div className="flex items-start justify-between gap-3">
@@ -2007,6 +2273,16 @@ export default function Home() {
                           {expandedCategoryInfo ? "Ocultar detalhes" : "Ver detalhes"}
                         </button>
                       </div>
+
+                      {selectedEntity.entity.code &&
+                        isSameICFCategory(
+                          selectedEntity.entity.code,
+                          selectedEntity.entity.id
+                        ) && (
+                          <div className="mt-3 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-xs font-semibold text-green-800">
+                            ✓ Esta categoria já está na lista de classificações.
+                          </div>
+                        )}
 
                       {expandedCategoryInfo && (
                         <div className="mt-4 border-t border-gray-200 pt-4">
@@ -2081,6 +2357,10 @@ export default function Home() {
                                 : 0);
                             const isExpanded = expandedQualifierRules[rule.key] !== false;
                             const isOptional = rule.optional && !rule.required;
+                            const isStructureCategory =
+                              (selectedEntity.entity.code || "").toLowerCase().startsWith("s");
+                            const isEnvironmentalCategory =
+                              (selectedEntity.entity.code || "").toLowerCase().startsWith("e");
 
                             const selectNumeric = (percentage: number) => {
                               const value =
@@ -2105,7 +2385,9 @@ export default function Home() {
                             return (
                               <div
                                 key={rule.key}
-                                className={`rounded-lg border transition ${
+                                className={`${
+                                  isStructureCategory ? "rounded-md" : "rounded-lg"
+                                } border transition ${
                                   rule.optional
                                     ? "border-blue-200 bg-blue-50/30"
                                     : "border-gray-200 bg-gray-50"
@@ -2119,11 +2401,19 @@ export default function Home() {
                                       [rule.key]: !isExpanded,
                                     }))
                                   }
-                                  className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left"
+                                  className={`flex w-full items-center justify-between gap-3 text-left ${
+                                    isStructureCategory ? "px-2.5 py-1.5" : "px-3 py-2.5"
+                                  }`}
                                 >
                                   <div className="min-w-0">
                                     <div className="flex flex-wrap items-center gap-2">
-                                      <h4 className="text-sm font-bold text-gray-900">{rule.label}</h4>
+                                      <h4
+                                        className={`${
+                                          isStructureCategory ? "text-xs" : "text-sm"
+                                        } font-bold text-gray-900`}
+                                      >
+                                        {rule.label}
+                                      </h4>
                                       {rule.required && (
                                         <span className="rounded-full bg-red-100 px-2 py-0.5 text-[11px] font-semibold text-red-700">
                                           Obrigatório
@@ -2135,7 +2425,11 @@ export default function Home() {
                                         </span>
                                       )}
                                     </div>
-                                    <div className="mt-0.5 text-[11px] text-gray-500">
+                                    <div
+                                      className={`${
+                                        isStructureCategory ? "mt-0 text-[10px]" : "mt-0.5 text-[11px]"
+                                      } text-gray-500`}
+                                    >
                                       {selectedQualifier
                                         ? `${selectedQualifier.code || ""} — ${selectedQualifier.title || "Selecionado"}`
                                         : "Não preenchido"}
@@ -2147,9 +2441,19 @@ export default function Home() {
                                 </button>
 
                                 {isExpanded && (
-                                  <div className="border-t border-gray-200 px-3 pb-3 pt-2">
+                                  <div
+                                    className={`border-t border-gray-200 ${
+                                      isStructureCategory ? "px-2 pb-2 pt-1.5" : "px-3 pb-3 pt-2"
+                                    }`}
+                                  >
                                     {rule.description && (
-                                      <div className="mb-2 rounded-md border border-blue-200 bg-blue-50 px-2.5 py-2 text-xs leading-4 text-blue-800">
+                                      <div
+                                        className={`rounded-md border border-blue-200 bg-blue-50 text-blue-800 ${
+                                          isStructureCategory
+                                            ? "mb-1.5 px-2 py-1.5 text-[10px] leading-3.5"
+                                            : "mb-2 px-2.5 py-2 text-xs leading-4"
+                                        }`}
+                                      >
                                         {rule.description}
                                       </div>
                                     )}
@@ -2248,7 +2552,11 @@ export default function Home() {
                                               step={1}
                                               value={selectedPercentage}
                                               onChange={(event) => selectNumeric(Number(event.target.value))}
-                                              className="w-full accent-purple-600"
+                                              className={
+                                                isEnvironmentalCategory && rule.uiKind === "signedNumeric"
+                                                  ? "w-full appearance-none bg-transparent accent-purple-600 [&::-webkit-slider-runnable-track]:h-1 [&::-webkit-slider-runnable-track]:rounded-full [&::-webkit-slider-runnable-track]:bg-gray-300 [&::-webkit-slider-thumb]:-mt-1.5 [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:border-0 [&::-webkit-slider-thumb]:bg-purple-600 [&::-moz-range-track]:h-1 [&::-moz-range-track]:rounded-full [&::-moz-range-track]:bg-gray-300 [&::-moz-range-thumb]:h-4 [&::-moz-range-thumb]:w-4 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:bg-purple-600"
+                                                  : "w-full accent-purple-600"
+                                              }
                                             />
                                             <div className="mt-0.5 flex justify-between text-[9px] text-gray-400">
                                               <span>{rule.uiKind === "signedNumeric" ? "-100% Barreira" : "0%"}</span>
@@ -2259,7 +2567,11 @@ export default function Home() {
                                         )}
                                       </div>
                                     ) : (
-                                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                                      <div
+                                        className={`grid grid-cols-1 sm:grid-cols-2 ${
+                                          isStructureCategory ? "gap-1" : "gap-2"
+                                        }`}
+                                      >
                                         {rule.options.map((qualifier) => {
                                           const selected =
                                             selectedQualifier?.id === qualifier.id &&
@@ -2274,27 +2586,47 @@ export default function Home() {
                                                   [rule.key]: selected ? null : qualifier,
                                                 }))
                                               }
-                                              className={`group min-h-[72px] rounded-lg border p-3 text-left transition ${
+                                              className={`group rounded-md border text-left transition ${
+                                                isStructureCategory
+                                                  ? "min-h-[42px] px-2 py-1.5"
+                                                  : "min-h-[72px] p-3"
+                                              } ${
                                                 selected
                                                   ? "border-purple-500 bg-purple-50 shadow-sm"
                                                   : "border-gray-200 bg-white hover:border-purple-300 hover:bg-purple-50/40"
                                               }`}
                                             >
-                                              <div className="flex items-start justify-between gap-3">
+                                              <div
+                                                className={`flex items-start justify-between ${
+                                                  isStructureCategory ? "gap-2" : "gap-3"
+                                                }`}
+                                              >
                                                 <div className="min-w-0">
                                                   <div
-                                                    className={`text-sm font-bold ${
+                                                    className={`${
+                                                      isStructureCategory ? "text-[11px]" : "text-sm"
+                                                    } font-bold ${
                                                       selected ? "text-purple-800" : "text-gray-900"
                                                     }`}
                                                   >
                                                     {qualifier.code || "Opção"}
                                                   </div>
-                                                  <div className="mt-1 text-xs leading-4 text-gray-600">
+                                                  <div
+                                                    className={`${
+                                                      isStructureCategory
+                                                        ? "mt-0.5 text-[10px] leading-3.5"
+                                                        : "mt-1 text-xs leading-4"
+                                                    } text-gray-600`}
+                                                  >
                                                     {qualifier.title || "Sem descrição"}
                                                   </div>
                                                 </div>
                                                 <span
-                                                  className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md border text-xs font-bold transition ${
+                                                  className={`${
+                                                    isStructureCategory
+                                                      ? "mt-0 h-5 w-5 rounded border text-[10px]"
+                                                      : "mt-0.5 h-6 w-6 rounded-md border text-xs"
+                                                  } flex shrink-0 items-center justify-center font-bold transition ${
                                                     selected
                                                       ? "border-purple-600 bg-purple-600 text-white"
                                                       : "border-gray-300 bg-white text-transparent group-hover:border-purple-300"
@@ -2346,11 +2678,12 @@ export default function Home() {
                         ? "Selecione uma categoria"
                         : hasRequiredQualifierMissing
                           ? "Preencha os qualificadores obrigatórios"
-                          : classifications.some(
-                                (item) => item.code === selectedEntity?.entity?.code
+                          : isSameICFCategory(
+                                selectedEntity?.entity?.code,
+                                selectedEntity?.entity?.id
                               )
                             ? "Salvar alterações"
-                            : "Salvar classificação"}
+                            : "Adicionar à lista"}
                     </button>
                   </div>
                 )}

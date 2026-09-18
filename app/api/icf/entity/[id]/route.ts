@@ -539,9 +539,21 @@ export async function GET(
      * classificações antigas que foram salvas antes de o entityId
      * passar a ser persistido.
      */
+    /*
+     * Para códigos CIF terminais (por exemplo, b198/b199), o codeinfo
+     * pode devolver um stemId com um sufixo que faz parte da URI da
+     * entidade linearizada. Não devemos remover esse sufixo e reconstruir
+     * a URL apenas com o número, pois isso pode resolver para a categoria
+     * pai ("Funções mentais") em vez da folha ("Funções mentais, outras
+     * especificadas").
+     */
+    let entityUrlOverride: string | null = null;
+
     if (/^[bsde]\d+$/i.test(normalizedId)) {
+      const requestedCode = normalizedId.toLowerCase();
+
       const codeInfoResponse = await fetch(
-        `${ICF_BASE_URL}/codeinfo/${encodeURIComponent(normalizedId.toLowerCase())}`,
+        `${ICF_BASE_URL}/codeinfo/${encodeURIComponent(requestedCode)}`,
         {
           headers: {
             Authorization: `Bearer ${token}`,
@@ -564,24 +576,27 @@ export async function GET(
       }
 
       const codeInfo = await codeInfoResponse.json();
+
+      /*
+       * A documentação da OMS descreve stemId como a URI da entidade
+       * correspondente ao stem code. Para ICF, preservamos a URI inteira.
+       */
       const stemId =
         typeof codeInfo?.stemId === "string"
-          ? codeInfo.stemId
+          ? normalizeUrl(codeInfo.stemId)
           : "";
 
-      const match = stemId.match(/\/icf\/(\d+)(?:\/.*)?$/);
-
-      if (!match) {
+      if (!stemId) {
         return NextResponse.json(
           {
             success: false,
-            error: "A OMS não retornou o ID da categoria CIF.",
+            error: "A OMS não retornou a URI da categoria CIF.",
           },
           { status: 404 }
         );
       }
 
-      normalizedId = match[1];
+      entityUrlOverride = stemId;
     }
 
     /*
@@ -591,6 +606,7 @@ export async function GET(
      */
 
     const entityUrl =
+      entityUrlOverride ||
       `${ICF_BASE_URL}/${normalizedId}`;
 
     const response =
@@ -770,6 +786,7 @@ export async function GET(
 
       entity: {
         id:
+          extractIdFromUrl(data["@id"] || entityUrl) ||
           normalizedId,
 
         code:
