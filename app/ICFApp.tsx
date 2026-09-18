@@ -24,6 +24,7 @@ type SpeechRecognitionLike = {
 };
 
 type SpeechRecognitionResultEventLike = {
+  resultIndex?: number;
   results: {
     length: number;
     [index: number]: {
@@ -86,6 +87,7 @@ type EntityData = {
 
 type EntityResponse = {
   success: boolean;
+  error?: string;
   entity: EntityData;
   parents: TreeNode[];
   children: TreeNode[];
@@ -237,8 +239,8 @@ export default function Home() {
     useState<Record<string, boolean>>({});
   const [highlightedClassificationId, setHighlightedClassificationId] =
     useState<string | null>(null);
-  const classificationsRef = useRef<HTMLElement | null>(null);
-  const editorRef = useRef<HTMLElement | null>(null);
+  const classificationsRef = useRef<HTMLDivElement | null>(null);
+  const editorRef = useRef<HTMLDivElement | null>(null);
   const skipNextEditorAutoScrollRef = useRef(false);
 
   const [reportOpen, setReportOpen] = useState(false);
